@@ -94,3 +94,94 @@ pub fn tokenize(line: &str) -> Vec<Token> {
 
     tokens
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(line: &str) -> Vec<TokenKind> {
+        tokenize(line).into_iter().map(|t| t.kind).collect()
+    }
+
+    fn cols(line: &str) -> Vec<usize> {
+        tokenize(line).into_iter().map(|t| t.col).collect()
+    }
+
+    #[test]
+    fn empty_line_has_no_tokens() {
+        assert_eq!(kinds(""), vec![]);
+    }
+
+    #[test]
+    fn whitespace_only_has_no_tokens() {
+        assert_eq!(kinds("   \t "), vec![]);
+    }
+
+    #[test]
+    fn plain_number() {
+        assert_eq!(kinds("12"), vec![TokenKind::Number(12)]);
+        // the whole run of digits is one token starting at the first digit
+        assert_eq!(cols("12"), vec![1]);
+    }
+
+    #[test]
+    fn die_letter_is_case_insensitive() {
+        assert_eq!(kinds("d"), vec![TokenKind::Die]);
+        assert_eq!(kinds("D"), vec![TokenKind::Die]);
+    }
+
+    #[test]
+    fn bare_k_defaults_to_keep_high() {
+        assert_eq!(kinds("k"), vec![TokenKind::KeepHigh]);
+    }
+
+    #[test]
+    fn kh_and_kl_are_two_character_tokens() {
+        assert_eq!(kinds("kh3"), vec![TokenKind::KeepHigh, TokenKind::Number(3)]);
+        assert_eq!(cols("kh3"), vec![1, 3]);
+        assert_eq!(kinds("KL2"), vec![TokenKind::KeepLow, TokenKind::Number(2)]);
+    }
+
+    #[test]
+    fn bang_plus_minus() {
+        assert_eq!(
+            kinds("!+-"),
+            vec![TokenKind::Bang, TokenKind::Plus, TokenKind::Minus]
+        );
+    }
+
+    #[test]
+    fn unknown_character_is_preserved() {
+        assert_eq!(kinds("x"), vec![TokenKind::Unknown('x')]);
+    }
+
+    #[test]
+    fn whitespace_between_tokens_is_skipped_but_columns_stay_absolute() {
+        assert_eq!(kinds(" d 6"), vec![TokenKind::Die, TokenKind::Number(6)]);
+        assert_eq!(cols(" d 6"), vec![2, 4]);
+    }
+
+    #[test]
+    fn full_expression_columns() {
+        // 3 d 6 k h 1 !
+        // 1 2 3 4 5 6 7
+        assert_eq!(
+            kinds("3d6kh1!"),
+            vec![
+                TokenKind::Number(3),
+                TokenKind::Die,
+                TokenKind::Number(6),
+                TokenKind::KeepHigh,
+                TokenKind::Number(1),
+                TokenKind::Bang,
+            ]
+        );
+        assert_eq!(cols("3d6kh1!"), vec![1, 2, 3, 4, 6, 7]);
+    }
+
+    #[test]
+    fn digit_run_too_long_for_u64_saturates_instead_of_panicking() {
+        let huge = "9".repeat(30);
+        assert_eq!(kinds(&huge), vec![TokenKind::Number(u64::MAX)]);
+    }
+}
