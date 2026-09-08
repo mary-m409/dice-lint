@@ -14,6 +14,9 @@ pub enum TokenKind {
     Bang,     // '!' (exploding dice)
     Plus,
     Minus,
+    Star,     // '*' (multiplied terms)
+    LParen,
+    RParen,
     Unknown(char),
 }
 
@@ -69,6 +72,18 @@ pub fn tokenize(line: &str) -> Vec<Token> {
             }
             '-' => {
                 tokens.push(Token { kind: TokenKind::Minus, col });
+                i += 1;
+            }
+            '*' => {
+                tokens.push(Token { kind: TokenKind::Star, col });
+                i += 1;
+            }
+            '(' => {
+                tokens.push(Token { kind: TokenKind::LParen, col });
+                i += 1;
+            }
+            ')' => {
+                tokens.push(Token { kind: TokenKind::RParen, col });
                 i += 1;
             }
             'k' | 'K' => match chars.get(i + 1).copied() {
@@ -153,6 +168,22 @@ mod tests {
     #[test]
     fn unknown_character_is_preserved() {
         assert_eq!(kinds("x"), vec![TokenKind::Unknown('x')]);
+    }
+
+    #[test]
+    fn parens_and_star_are_their_own_tokens() {
+        assert_eq!(
+            kinds("(2d6)*3"),
+            vec![
+                TokenKind::LParen,
+                TokenKind::Number(2),
+                TokenKind::Die,
+                TokenKind::Number(6),
+                TokenKind::RParen,
+                TokenKind::Star,
+                TokenKind::Number(3),
+            ]
+        );
     }
 
     #[test]

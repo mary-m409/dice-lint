@@ -24,6 +24,9 @@ before the file ships.
 - `kh#` / `kl#` - keep the highest/lowest `#` dice
 - `!` - exploding dice
 - terms can be chained with `+` and `-`, e.g. `4d6kh3 + 2 - 1d4`
+- a term can be scaled with `*`, e.g. `2d6*3` or `(1d6+2)*4`
+- terms can be grouped with parentheses, including nested groups, e.g.
+  `(2d4kh1! - 1) * 2 + 3d6`
 - lines that are blank or start with `#` are treated as comments and skipped
 
 ## Example
@@ -74,6 +77,7 @@ $ echo $?
 | E001 | error | dice count is zero |
 | E002 | error | die has zero sides |
 | E003 | error | keep modifier keeps zero dice |
+| E004 | error | a `*` multiplier is zero |
 | W001 | warning | die has exactly one side (`d1`) |
 | W002 | warning | dice count is over 1000 |
 | W003 | warning | keep modifier keeps all the dice it rolled |

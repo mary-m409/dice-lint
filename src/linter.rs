@@ -1,6 +1,7 @@
 //! Parses a line of dice notation and checks it against a small set of
 //! rules. Supported shape: `[N]dM[kh#|kl#][!]` terms joined by `+` / `-`,
-//! e.g. `3d6 + 2d4kh1! - 1`.
+//! where a term is one or more factors joined by `*` and a factor can be
+//! parenthesized, e.g. `3d6 + (2d4kh1! - 1) * 2`.
 
 use crate::lexer::{self, Token, TokenKind};
 
@@ -41,10 +42,14 @@ struct DiceTerm {
     col: usize,
 }
 
-enum Term {
-    Flat,
+enum Factor {
+    Number(u64, usize),
     Dice(DiceTerm),
+    Group(Vec<Term>, usize),
 }
+
+/// A term is one or more factors joined by `*`, e.g. `2d6`, or `(2d6+1)*3`.
+type Term = Vec<Factor>;
 
 struct ParseError {
     col: usize,
@@ -73,65 +78,106 @@ pub fn lint_line(line_no: usize, text: &str) -> Vec<Finding> {
 }
 
 fn parse_terms(tokens: &[Token]) -> Result<Vec<Term>, ParseError> {
-    let mut terms = Vec::new();
     let mut i = 0;
+    parse_additive(tokens, &mut i, false)
+}
+
+/// Parses a `term (('+' | '-') term)*` chain. When `stop_at_rparen` is set
+/// (we're inside a parenthesized group) the chain also ends when the next
+/// token is `)`, leaving it for the caller to consume.
+fn parse_additive(tokens: &[Token], i: &mut usize, stop_at_rparen: bool) -> Result<Vec<Term>, ParseError> {
+    let mut terms = Vec::new();
     let mut expect_sign = false;
 
-    while i < tokens.len() {
+    loop {
+        let at_close = stop_at_rparen && tokens.get(*i).map(|t| t.kind == TokenKind::RParen).unwrap_or(false);
+        if *i >= tokens.len() || at_close {
+            break;
+        }
+
         if expect_sign {
-            match tokens[i].kind {
-                TokenKind::Plus | TokenKind::Minus => i += 1,
+            match tokens[*i].kind {
+                TokenKind::Plus | TokenKind::Minus => *i += 1,
                 _ => {
                     return Err(ParseError {
-                        col: tokens[i].col,
+                        col: tokens[*i].col,
                         message: "expected '+' or '-' between terms".to_string(),
                     })
                 }
             }
         }
 
-        let leading_number = expect_number(tokens, &mut i)?;
-
-        if i < tokens.len() && tokens[i].kind == TokenKind::Die {
-            let die_col = tokens[i].col;
-            i += 1;
-            let sides = expect_number(tokens, &mut i)?;
-
-            let mut keep = None;
-            if i < tokens.len() {
-                let kind = match tokens[i].kind {
-                    TokenKind::KeepHigh => Some(Keep::High),
-                    TokenKind::KeepLow => Some(Keep::Low),
-                    _ => None,
-                };
-                if let Some(kind) = kind {
-                    i += 1;
-                    let amount = expect_number(tokens, &mut i)?;
-                    keep = Some((kind, amount));
-                }
-            }
-
-            if i < tokens.len() && tokens[i].kind == TokenKind::Bang {
-                i += 1;
-            }
-
-            terms.push(Term::Dice(DiceTerm {
-                count: leading_number,
-                sides,
-                keep,
-                col: die_col,
-            }));
-        } else {
-            terms.push(Term::Flat);
-        }
-
+        terms.push(parse_term(tokens, i)?);
         expect_sign = true;
     }
 
     Ok(terms)
 }
 
-fn expect_number(tokens: &[Token], i: &mut usize) -> Result<u64, ParseError> {
+/// Parses a `factor ('*' factor)*` chain.
+fn parse_term(tokens: &[Token], i: &mut usize) -> Result<Term, ParseError> {
+    let mut factors = vec![parse_factor(tokens, i)?];
+    while *i < tokens.len() && tokens[*i].kind == TokenKind::Star {
+        *i += 1;
+        factors.push(parse_factor(tokens, i)?);
+    }
+    Ok(factors)
+}
+
+fn parse_factor(tokens: &[Token], i: &mut usize) -> Result<Factor, ParseError> {
+    if *i < tokens.len() && tokens[*i].kind == TokenKind::LParen {
+        let paren_col = tokens[*i].col;
+        *i += 1;
+        let inner = parse_additive(tokens, i, true)?;
+        match tokens.get(*i) {
+            Some(t) if t.kind == TokenKind::RParen => *i += 1,
+            _ => {
+                return Err(ParseError {
+                    col: paren_col,
+                    message: "unclosed '('".to_string(),
+                })
+            }
+        }
+        return Ok(Factor::Group(inner, paren_col));
+    }
+
+    let (leading_number, number_col) = expect_number(tokens, i)?;
+
+    if *i < tokens.len() && tokens[*i].kind == TokenKind::Die {
+        let die_col = tokens[*i].col;
+        *i += 1;
+        let (sides, _) = expect_number(tokens, i)?;
+
+        let mut keep = None;
+        if *i < tokens.len() {
+            let kind = match tokens[*i].kind {
+                TokenKind::KeepHigh => Some(Keep::High),
+                TokenKind::KeepLow => Some(Keep::Low),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                *i += 1;
+                let (amount, _) = expect_number(tokens, i)?;
+                keep = Some((kind, amount));
+            }
+        }
+
+        if *i < tokens.len() && tokens[*i].kind == TokenKind::Bang {
+            *i += 1;
+        }
+
+        Ok(Factor::Dice(DiceTerm {
+            count: leading_number,
+            sides,
+            keep,
+            col: die_col,
+        }))
+    } else {
+        Ok(Factor::Number(leading_number, number_col))
+    }
+}
+
+fn expect_number(tokens: &[Token], i: &mut usize) -> Result<(u64, usize), ParseError> {
     if *i >= tokens.len() {
         return Err(ParseError {
             col: tokens.last().map(|t| t.col).unwrap_or(1),
@@ -140,8 +186,9 @@ fn expect_number(tokens: &[Token], i: &mut usize) -> Result<u64, ParseError> {
     }
     match tokens[*i].kind {
         TokenKind::Number(n) => {
+            let col = tokens[*i].col;
             *i += 1;
-            Ok(n)
+            Ok((n, col))
         }
         ref other => Err(ParseError {
             col: tokens[*i].col,
@@ -159,77 +206,101 @@ fn describe(kind: &TokenKind) -> String {
         TokenKind::Bang => "!".to_string(),
         TokenKind::Plus => "+".to_string(),
         TokenKind::Minus => "-".to_string(),
+        TokenKind::Star => "*".to_string(),
+        TokenKind::LParen => "(".to_string(),
+        TokenKind::RParen => ")".to_string(),
         TokenKind::Unknown(c) => c.to_string(),
     }
 }
 
 fn check_terms(line_no: usize, terms: &[Term]) -> Vec<Finding> {
     let mut findings = Vec::new();
+    check_terms_into(line_no, terms, &mut findings);
+    findings
+}
 
+fn check_terms_into(line_no: usize, terms: &[Term], findings: &mut Vec<Finding>) {
     for term in terms {
-        let dice = match term {
-            Term::Dice(d) => d,
-            Term::Flat => continue,
-        };
+        // A term with more than one factor is a multiplication, e.g.
+        // `2d6*3` or `(2d6+1)*0`; a bare flat number is just a modifier.
+        let is_scaled = term.len() > 1;
 
-        if dice.count == 0 {
-            findings.push(Finding {
-                line: line_no,
-                col: dice.col,
-                severity: Severity::Error,
-                code: "E001",
-                message: "dice count is zero, this term always contributes nothing".to_string(),
-            });
-        } else if dice.count > MAX_SANE_DICE_COUNT {
-            findings.push(Finding {
-                line: line_no,
-                col: dice.col,
-                severity: Severity::Warning,
-                code: "W002",
-                message: format!("dice count {} is unusually large, check for a typo", dice.count),
-            });
-        }
-
-        if dice.sides == 0 {
-            findings.push(Finding {
-                line: line_no,
-                col: dice.col,
-                severity: Severity::Error,
-                code: "E002",
-                message: "a die cannot have zero sides".to_string(),
-            });
-        } else if dice.sides == 1 {
-            findings.push(Finding {
-                line: line_no,
-                col: dice.col,
-                severity: Severity::Warning,
-                code: "W001",
-                message: "a single-sided die always rolls 1, this is probably a typo".to_string(),
-            });
-        }
-
-        if let Some((_, amount)) = dice.keep {
-            if amount == 0 {
-                findings.push(Finding {
-                    line: line_no,
-                    col: dice.col,
-                    severity: Severity::Error,
-                    code: "E003",
-                    message: "keep modifier keeps zero dice".to_string(),
-                });
-            } else if dice.count > 0 && amount >= dice.count {
-                findings.push(Finding {
-                    line: line_no,
-                    col: dice.col,
-                    severity: Severity::Warning,
-                    code: "W003",
-                    message: "keep modifier keeps all dice, it has no effect here".to_string(),
-                });
+        for factor in term {
+            match factor {
+                Factor::Dice(dice) => check_dice(line_no, dice, findings),
+                Factor::Group(inner, _) => check_terms_into(line_no, inner, findings),
+                Factor::Number(n, col) => {
+                    if is_scaled && *n == 0 {
+                        findings.push(Finding {
+                            line: line_no,
+                            col: *col,
+                            severity: Severity::Error,
+                            code: "E004",
+                            message: "multiplier is zero, this term always contributes nothing".to_string(),
+                        });
+                    }
+                }
             }
         }
     }
+}
 
-    findings
+fn check_dice(line_no: usize, dice: &DiceTerm, findings: &mut Vec<Finding>) {
+    if dice.count == 0 {
+        findings.push(Finding {
+            line: line_no,
+            col: dice.col,
+            severity: Severity::Error,
+            code: "E001",
+            message: "dice count is zero, this term always contributes nothing".to_string(),
+        });
+    } else if dice.count > MAX_SANE_DICE_COUNT {
+        findings.push(Finding {
+            line: line_no,
+            col: dice.col,
+            severity: Severity::Warning,
+            code: "W002",
+            message: format!("dice count {} is unusually large, check for a typo", dice.count),
+        });
+    }
+
+    if dice.sides == 0 {
+        findings.push(Finding {
+            line: line_no,
+            col: dice.col,
+            severity: Severity::Error,
+            code: "E002",
+            message: "a die cannot have zero sides".to_string(),
+        });
+    } else if dice.sides == 1 {
+        findings.push(Finding {
+            line: line_no,
+            col: dice.col,
+            severity: Severity::Warning,
+            code: "W001",
+            message: "a single-sided die always rolls 1, this is probably a typo".to_string(),
+        });
+    }
+
+    if let Some((_, amount)) = dice.keep {
+        if amount == 0 {
+            findings.push(Finding {
+                line: line_no,
+                col: dice.col,
+                severity: Severity::Error,
+                code: "E003",
+                message: "keep modifier keeps zero dice".to_string(),
+            });
+        } else if dice.count > 0 && amount >= dice.count {
+            findings.push(Finding {
+                line: line_no,
+                col: dice.col,
+                severity: Severity::Warning,
+                code: "W003",
+                message: "keep modifier keeps all dice, it has no effect here".to_string(),
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -343,6 +414,68 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].code, "E000");
         assert_eq!(findings[0].col, 4);
+    }
+
+    #[test]
+    fn multiplied_dice_term_has_no_findings() {
+        assert_eq!(codes("2d6*3"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn zero_multiplier_after_dice_is_an_error() {
+        let findings = lint_line(1, "2d6*0");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E004");
+        assert_eq!(findings[0].col, 5);
+    }
+
+    #[test]
+    fn zero_multiplier_before_a_group_is_an_error() {
+        let findings = lint_line(1, "0*(2d6+3)");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E004");
+        assert_eq!(findings[0].col, 1);
+    }
+
+    #[test]
+    fn a_bare_flat_number_is_not_a_multiplier() {
+        // no '*' involved, so a plain 0 modifier is not flagged
+        assert_eq!(codes("1d6 + 0"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn parenthesized_term_is_checked_like_any_other() {
+        let findings = lint_line(1, "(0d6 + 3) * 2");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E001");
+    }
+
+    #[test]
+    fn nested_groups_are_checked() {
+        let findings = lint_line(1, "((1d0))");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E002");
+    }
+
+    #[test]
+    fn valid_parenthesized_and_multiplied_expression_has_no_findings() {
+        assert_eq!(codes("(2d4kh1! - 1) * 2 + 3d6"), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unclosed_parenthesis_is_a_parse_error() {
+        let findings = lint_line(1, "(2d6 + 3");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E000");
+        assert_eq!(findings[0].col, 1);
+        assert!(findings[0].message.contains("unclosed"));
+    }
+
+    #[test]
+    fn unmatched_closing_paren_is_a_parse_error() {
+        let findings = lint_line(1, "2d6)");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].code, "E000");
     }
 
     #[test]
